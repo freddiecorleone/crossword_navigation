@@ -4,11 +4,14 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol, Any
 import random
 
+from matplotlib.pyplot import grid
+
 # Simple, direct imports - no circular dependencies!
 from .types import (
     EntryId, EntryState, Grid, SimConfig, Topology, Cell,
     ProbabilityModel, EpochOutcome, EpisodeResult
 )
+from .debug import debug_print
 
 # Remove the circular import - we'll use TYPE_CHECKING instead
 from typing import TYPE_CHECKING
@@ -70,15 +73,15 @@ class Environment:
     
     def _print_grid_state(self):
         """Print a clear summary of the current crossword state."""
-        print("📊 Current Grid State:")
+        debug_print("📊 Current Grid State:")
         for entry_id, entry in self.grid.entries.items():
             status = "✅" if entry.solved else ("🚫" if entry.guess_with_current_letters else "⭕")
             filled_ratio = f"{len(entry.filled_indices)}/{entry.L}"
-            print(f"   {status} {entry_id}: {filled_ratio} letters {'[SOLVED]' if entry.solved else ('[GUESSED]' if entry.guess_with_current_letters else '[AVAILABLE]')}")
+            debug_print(f"   {status} {entry_id}: {filled_ratio} letters {'[SOLVED]' if entry.solved else ('[GUESSED]' if entry.guess_with_current_letters else '[AVAILABLE]')}")
         
         solved_count = sum(1 for e in self.grid.entries.values() if e.solved)
         total_count = len(self.grid.entries)
-        print(f"📈 Progress: {solved_count}/{total_count} entries solved")
+        debug_print(f"📈 Progress: {solved_count}/{total_count} entries solved")
 
     def _apply_success(self, entry_id: EntryId) -> None:
         e = self.grid.entries[entry_id]
@@ -132,21 +135,43 @@ class Environment:
         new_index = self.rng.choice(unrevealed)
         e.filled_indices.add(new_index)
         e.guess_with_current_letters = False  # new info → can try again
-        print("Total filled letters: ", e.filled_indices)
-        
-        # ✅ NEW: if all letters revealed, mark solved + propagate
+
         if len(e.filled_indices) == e.L:
             e.solved = True
-            # propagate crossings to neighbors (same as _apply_success)
+    
+        #find crossing clues of e 
+        crossing_clues = [t if new_index in self.grid.crossings[target][t] else None for t in self.grid.crossings[target]]
+        
+        #Handle neighbors of e
+
+        
+        #look at each crossing clue
+        for clue in crossing_clues:
+            if clue is not None:
+                #find where e crosses clue and fill in those indices
+                crossing_indices = self.grid.crossings[clue][target]
+                for i in crossing_indices:
+                    self.grid.entries[clue].filled_indices.add(i)
+
+                #if crossing clue was marked as guessed, unmark it  
+                self.grid.entries[clue].guess_with_current_letters = False
+                #if crossing clue is fully filled, mark as solved
+                if len(self.grid.entries[clue].filled_indices) == self.grid.entries[clue].L:
+                    self.grid.entries[clue].solved = True
+
+
+        
+        print("Total filled letters: ", e.filled_indices)
+        
         return target
 
 
     def epoch(self, policy: 'Policy', model: ProbabilityModel) -> EpochOutcome:
         # Show current grid state
-        print(f"\n--- EPOCH START ---")
-        print("📋 Current Crossword Grid:")
+        debug_print(f"\n--- EPOCH START ---")
+        debug_print("📋 Current Crossword Grid:")
         render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
-        print()
+        debug_print()
         self._print_grid_state()
         
         # Get policy's planned order for this epoch
@@ -157,20 +182,20 @@ class Environment:
             and not self.grid.entries[i].guess_with_current_letters
         ]
         
-        print(f"🎯 Policy recommends trying: {full_order}")
-        print(f"📋 Available to attempt: {order}")
+        debug_print(f"🎯 Policy recommends trying: {full_order}")
+        debug_print(f"📋 Available to attempt: {order}")
 
         if not order:
-            print("❌ No entries available to attempt - using hint")
+            debug_print("❌ No entries available to attempt - using hint")
             tgt = self._apply_hint()
-            print(f"💡 Applied hint to entry '{tgt}'")
-            print(f"📋 Updated Grid:")
+            debug_print(f"💡 Applied hint to entry '{tgt}'")
+            debug_print(f"📋 Updated Grid:")
             render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
             return EpochOutcome(cost=self.cfg.hint_cost, solved_entry=None,
                                 used_hint=True, attempts_order=[], attempts_taken=0,
                                 info={"hint_target": tgt})
 
-        print(f"🎲 Attempting entries in order...")
+        debug_print(f"🎲 Attempting entries in order...")
         attempts = 0
         for entry_id in order:
             e = self.grid.entries[entry_id]
@@ -179,24 +204,24 @@ class Environment:
             attempts += 1
             rv = self.rng.random()
             
-            print(f"  🎯 Attempt #{attempts}: Entry '{entry_id}' (L={e.L}, filled={len(e.filled_indices)}/{e.L})")
-            print(f"     📊 Model probability: {p:.3f}, Random roll: {rv:.3f}")
+            debug_print(f"  🎯 Attempt #{attempts}: Entry '{entry_id}' (L={e.L}, filled={len(e.filled_indices)}/{e.L})")
+            debug_print(f"     📊 Model probability: {p:.3f}, Random roll: {rv:.3f}")
             
             if rv < p:
-                print(f"     ✅ SUCCESS! Solved entry '{entry_id}'")
+                debug_print(f"     ✅ SUCCESS! Solved entry '{entry_id}'")
                 self._apply_success(entry_id)
-                print(f"     🔗 Crossings updated")
-                print(f"📋 Updated Grid:")
+                debug_print(f"     🔗 Crossings updated")
+                debug_print(f"📋 Updated Grid:")
                 render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
                 return EpochOutcome(cost=attempts, solved_entry=entry_id, used_hint=False,
                                     attempts_order=order, attempts_taken=attempts, info={"p": p})
             else:
-                print(f"     ❌ FAILED - marking as 'guessed with current letters'")
+                debug_print(f"     ❌ FAILED - marking as 'guessed with current letters'")
                 e.guess_with_current_letters = True
 
-        print(f"💔 All attempts failed - using hint")
+        debug_print(f"💔 All attempts failed - using hint")
         tgt = self._apply_hint()
-        print(f"💡 Applied hint to entry '{tgt}'")
+        debug_print(f"💡 Applied hint to entry '{tgt}'")
         print(f"📋 Updated Grid:")
         render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
 
@@ -209,13 +234,13 @@ class Environment:
         total = 0; steps = 0; hints = 0
         log: List[EpochOutcome] = []
         
-        print(f"\n🚀 STARTING EPISODE")
+        debug_print(f"\n🚀 STARTING EPISODE")
         self._print_grid_state()
         
         while not self.all_solved() and steps < self.cfg.max_steps:
-            print(f"\n{'='*50}")
-            print(f"🎯 EPOCH {steps + 1}")
-            print(f"{'='*50}")
+            debug_print(f"\n{'='*50}")
+            debug_print(f"🎯 EPOCH {steps + 1}")
+            debug_print(f"{'='*50}")
             
             outcome = self.epoch(policy, model)
             total += outcome.cost
@@ -223,11 +248,12 @@ class Environment:
             hints += int(outcome.used_hint)
             log.append(outcome)
             
-            print(f"📊 EPOCH {steps} SUMMARY:")
-            print(f"   Cost: {outcome.cost} | Solved: {outcome.solved_entry or 'None'} | Used hint: {outcome.used_hint}")
+            debug_print(f"📊 EPOCH {steps} SUMMARY:")
+            debug_print(f"   Cost: {outcome.cost} | Solved: {outcome.solved_entry or 'None'} | Used hint: {outcome.used_hint}")
             
             if self.all_solved():
-                print(f"\n🎉 ALL ENTRIES SOLVED! Episode complete in {steps} epochs.")
+                print(f"\n🎉 ALL ENTRIES SOLVED! Episode complete in {steps} epochs with cost {total}")
+                break  # Exit immediately when solved!
         return EpisodeResult(
             total_cost=total,
             steps=steps,
@@ -279,4 +305,4 @@ def render_ascii(
     # Render
     for r in range(R):
         row_str = "".join(fmt_cell(r, c) for c in range(C))
-        print(row_str)
+        debug_print(row_str)

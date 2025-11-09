@@ -40,7 +40,7 @@ class Grid:
 
 @dataclass
 class SimConfig:
-    hint_cost: int = 1
+    hint_cost: int = 0
     eps_floor: float = 1e-4
     max_steps: int = 10000
     rng_seed: Optional[int] = None

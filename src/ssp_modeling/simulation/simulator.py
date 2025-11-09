@@ -9,16 +9,23 @@ import random
 import sys
 import os
 from pathlib import Path
+from .debug import debug_print
+from .value import ValueFunction, IsolatedExpectedCost
 
-# Simple, direct imports!
-from .types import Grid, EntryState, SimConfig, Topology
-from .grid_generator import generate_grid 
 
-# Add src directory to Python path
+
+
+# Add src directory to Python path FIRST
 current_file = Path(__file__)
 src_dir = current_file.parent.parent.parent  # Go up to src directory
 sys.path.insert(0, str(src_dir))
 
+# Now we can do all imports
+from .types import Grid, EntryState, SimConfig, Topology, EpisodeResult, ProbabilityModel
+from .policy import Policy
+from .policy import GreedyP, OneStepRollout
+from .grid_generator import generate_grid 
+from ssp_modeling.models.xgb_model import XGBProbability, DummyModel
 from ssp_modeling.utils.path import get_project_root
 
 # Import base classes first to avoid circular dependencies
@@ -148,19 +155,12 @@ def create_simple_models():
     
     return None, DummyModel
 
-def create_simple_value_function():
-    """Create simple value function"""
-    class ValueFunction:
-        def __call__(self, *args):
-            return 0.0
-    return ValueFunction
-
-def make_random_env(seed: Optional[int] = None):
+def make_random_env(rows = 5, cols= 5, seed: Optional[int] = random.randint(1, 100000)):
     # Get the Environment class properly
     Environment, EntryState, Grid, SimConfig = get_environment_classes()
     
     # Simple, direct usage - no complex imports!
-    grid_obj, topo = generate_grid(rows = 5, cols = 5, return_topology=True)
+    grid_obj, topo = generate_grid(rows = rows, cols = cols, return_topology=True)
     cfg = SimConfig(rng_seed=seed, hint_cost=1)
     return Environment(grid=grid_obj, topo=topo, cfg=cfg)
 
@@ -194,72 +194,42 @@ def make_toy_env(seed: Optional[int] = None):
     
     return Environment(grid=grid, topo=topo, cfg=cfg)
 
-def main():
-    print("=== Starting Crossword Simulation ===")
-    
-    # Get classes
-    XGBProbability, DummyModel = get_model_classes()
-    GreedyP, OneStepRollout = get_policy_classes()
-    ValueFunction = get_value_function()
-    
-    # Choose model
-    use_xgb = True  # flip to True and set model_path if you want to use your XGBoost
-    print(f"Using XGBoost model: {use_xgb}")
-    
-    if use_xgb and XGBProbability:
+def simulate_fill(policy: Policy, rows = 5, cols = 5, seed: Optional[int] = None, model: Optional[ProbabilityModel] = None) -> EpisodeResult:
+
+    if model is None:
         model_path = get_project_root() / "data" / "processed" / "crossword_model.pkl"
         print(f"Loading model from: {model_path}")
         model = XGBProbability(model_path=model_path)
-        print("✓ XGBoost model loaded successfully")
-    else:
-        model = DummyModel(bias=-1.0)
-        print("✓ Using dummy model")
-
-    # Choose policy: GreedyP or OneStepRollout
-    policy_name = "rollout"  # "greedy" or "rollout"
-    print(f"Using policy: {policy_name}")
     
-    if policy_name == "greedy" and GreedyP:
-        policy = GreedyP(min_p_for_attempt=0.0)
-        print("✓ Greedy policy initialized")
-    elif OneStepRollout and ValueFunction:
-        policy = OneStepRollout(ValueFunction(), hint_threshold=0.0)
-        print("✓ One-step rollout policy initialized")
-    else:
-        # Fallback to simple policy
-        GreedyP, _ = get_policy_classes()
-        policy = GreedyP()
-        print("✓ Simple policy initialized")
-
-    print("\n=== Setting up environment ===")
-    env = make_random_env() # Random seed for different results each time
-    print("✓ Environment created")
+    env = make_random_env(rows = rows, cols = cols, seed=seed)
     
-    print("\n" + "="*60)
-    print("🎮 STARTING SIMULATION")
-    print("="*60)
+    # Debug: Print grid info
+    debug_print(f"🔍 Grid Debug - Seed: {seed}")
+    debug_print(f"   Grid size: {rows}x{cols}")
+    debug_print(f"   Total entries: {len(env.grid.entries)}")
+    debug_print(f"   Entry IDs: {list(env.grid.entries.keys())}")
+    for entry_id, entry in env.grid.entries.items():
+        debug_print(f"   {entry_id}: Length = {entry.L}")
     
-    res = env.run_episode(policy, model)
+    result = env.run_episode(policy, model)
     
-    print(f"\n" + "="*60)
-    print("🏁 SIMULATION COMPLETE")
-    print("="*60)
-    print(f"📊 FINAL RESULTS:")
-    print(f"   Policy: {policy.name() if hasattr(policy,'name') else policy.__class__.__name__}")
-    print(f"   Success: {res.terminated} | Epochs: {res.steps} | Total cost: {res.total_cost}")
-    print(f"   Entries solved: {res.solved_count}/{len(env.grid.entries)} | Hints used: {res.hints_used}")
-    
-    if res.steps <= 10:
-        print(f"\n📋 EPOCH SUMMARY:")
-        for t, ep in enumerate(res.log, 1):
-            result = f"✅ Solved {ep.solved_entry}" if ep.solved_entry else f"💡 Used hint"
-            print(f"   Epoch {t:2d}: {result} (cost: {ep.cost})")
-    else:
-        print(f"\n📋 FIRST 10 EPOCHS:")
-        for t, ep in enumerate(res.log[:10], 1):
-            result = f"✅ Solved {ep.solved_entry}" if ep.solved_entry else f"💡 Used hint"
-            print(f"   Epoch {t:2d}: {result} (cost: {ep.cost})")
+    print(f"🎯 Result: {result.steps} epochs, {result.total_cost} total cost")
+    return result 
 
 if __name__ == "__main__":
-    main()
+    # Try different grid sizes for more variation
+    import random
+    
+    grid_sizes = [(4, 4), (5, 5), (6, 6), (7, 7)]
+    
+    for rows, cols in grid_sizes:
+        debug_print(f"\n{'='*50}")
+        debug_print(f"Testing {rows}x{cols} grid:")
+        value = IsolatedExpectedCost()
+        result = simulate_fill(OneStepRollout(value), rows=rows, cols=cols, seed=random.randint(1, 10000))
+        debug_print(f"Result: {result.steps} epochs, {result.total_cost} total cost")
+        debug_print('='*50)
 
+
+    
+   

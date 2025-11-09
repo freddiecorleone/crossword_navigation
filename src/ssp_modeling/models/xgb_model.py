@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Protocol, Any
+from typing import Dict, List, Optional, Protocol, Any, Union, overload
 from ..simulation.environment import EntryState, Grid, EntryId, ProbabilityModel
 import math
 from ..models.feature_maker import make_features
@@ -20,8 +20,13 @@ class DummyModel(ProbabilityModel):
     def _sigmoid(x: float) -> float:
         return 1.0/(1.0+math.exp(-x))
 
-    def prob_solve(self, grid: Grid, entry_id: EntryId) -> float:
-        f = make_features(grid, entry_id)
+    def prob_solve(self, grid: Grid, entry_id: EntryId, entry_state: Optional[EntryState] = None) -> float:
+        """
+        Calculate solve probability from Grid and EntryId.
+        If entry_state is provided, use it directly. Otherwise, extract from grid.
+        """
+        f = make_features(grid, entry_id, entry_state)
+            
         # Weights are arbitrary but sane for a prior; tune if desired.
         x = (
             self.bias
@@ -36,6 +41,27 @@ class DummyModel(ProbabilityModel):
         p = max(1e-6, min(1-1e-6, p))
         return p
 
+    def prob_solve_entry_state(self, entry_state: EntryState) -> float:
+        """Calculate solve probability directly from EntryState."""
+        from ..models.feature_maker import make_features_from_entry_state
+        
+        f = make_features_from_entry_state(entry_state)
+            
+        # Weights are arbitrary but sane for a prior; tune if desired.
+        x = (
+            self.bias
+            + 0.35 * f["first_letter_revealed"]
+            + 0.35 * f["last_letter_revealed"]
+            + 0.25 * f["consecutive_sequences"]
+            + 0.08 * f["position_spread"]
+            - 0.28 * f["num_letters_remaining"]
+        )
+        p = self._sigmoid(x)
+        # clamp a bit
+        p = max(1e-6, min(1-1e-6, p))
+        return p
+
+
 class XGBProbability(ProbabilityModel):
     """
     Use trained XGBoost model with proper scaler (loaded from .pkl file).
@@ -47,7 +73,8 @@ class XGBProbability(ProbabilityModel):
             import pandas as pd
         except Exception as e:
             raise RuntimeError("pickle and pandas must be installed to use XGBProbability") from e
-        
+        if model_path is None:
+            model_path = "ssp_modeling/models/xgb_model.pkl"
         # Load the full model with scaler from .pkl file
         with open(model_path, 'rb') as f:
             model_data = pickle.load(f)
@@ -57,8 +84,12 @@ class XGBProbability(ProbabilityModel):
         self.feature_names = model_data['feature_names']
         self.pd = pd
 
-    def prob_solve(self, grid: Grid, entry_id: EntryId) -> float:
-        f = make_features(grid, entry_id)
+    def prob_solve(self, grid: Grid, entry_id: EntryId, entry_state: Optional[EntryState] = None) -> float:
+        """
+        Calculate solve probability from Grid and EntryId.
+        If entry_state is provided, use it directly. Otherwise, extract from grid.
+        """
+        f = make_features(grid, entry_id, entry_state)
         
         # Create DataFrame with proper feature names and order
         features_df = self.pd.DataFrame([[f[name] for name in self.feature_names]], 
@@ -70,6 +101,20 @@ class XGBProbability(ProbabilityModel):
         # Get probability prediction for class 1 (success)
         p = float(self.model.predict_proba(features_scaled)[0, 1])
         return max(1e-6, min(1-1e-6, p))
-    
 
-
+    def prob_solve_entry_state(self, entry_state: EntryState) -> float:
+        """Calculate solve probability directly from EntryState."""
+        from ..models.feature_maker import make_features_from_entry_state
+        
+        f = make_features_from_entry_state(entry_state)
+        
+        # Create DataFrame with proper feature names and order
+        features_df = self.pd.DataFrame([[f[name] for name in self.feature_names]], 
+                                       columns=self.feature_names)
+        
+        # Scale features using trained scaler
+        features_scaled = self.scaler.transform(features_df)
+        
+        # Get probability prediction for class 1 (success)
+        p = float(self.model.predict_proba(features_scaled)[0, 1])
+        return max(1e-6, min(1-1e-6, p))

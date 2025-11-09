@@ -1,7 +1,11 @@
 # src/simulation/value.py
 from __future__ import annotations
 from typing import Dict, List
-from .types import Grid, EntryId, ProbabilityModel
+from .types import Grid, EntryId, ProbabilityModel, EntryState
+
+import numpy as np
+import copy
+import random
 
 
 class ValueFunction:
@@ -61,3 +65,115 @@ class ValueFunction:
         p_i = max(1e-8, min(1-1e-8, model.prob_solve(grid, i)))
         V_succ = self._simulate_success_then(grid, i, model)
         return 1.0 + p_i * V_succ + (1.0 - p_i) * V_fail
+
+
+class IsolatedExpectedCost(ValueFunction):
+    """V(S) = sum w_j*(1 - p_j)/p_j with w_j = unrevealed letters; ignores crossings."""
+    def V(self, grid: Grid, model: ProbabilityModel) -> float:
+        total = 0.0
+        for i, e in grid.entries.items():
+            if e.solved: continue
+            if e.guess_with_current_letters: continue
+            p = max(1e-8, min(1-1e-8, model.prob_solve(grid, i)))
+            total += self.weight(grid, i) * (1.0 - p) / p
+        return total
+
+
+    def one_step_score(self, grid: Grid, model: ProbabilityModel, i: EntryId) -> float:
+        p = max(1e-8, min(1-1e-8, model.prob_solve(grid, i)))
+        #get all the neighbors that have unfilled crossing squares with i:
+        unfilled_neighbors = []
+        for neighbor, indices in grid.crossings.get(i, {}).items():
+            
+            #get crossing index for neighbor:
+            neighbor_crosspoints = grid.crossings[neighbor][i]
+            
+            #get filled indices for neighbor
+            neighbor_filled_indices = grid.entries[neighbor].filled_indices
+            
+            if any(crosspoint not in neighbor_filled_indices for crosspoint in neighbor_crosspoints):
+                unfilled_neighbors.append(neighbor)
+
+        V_delta = sum(self.isolated_E_score(grid, model, i) for i in unfilled_neighbors)
+
+        return p * V_delta
+    
+
+
+    def isolated_E_score(self, grid: Grid, model: ProbabilityModel, k: EntryId) -> float:
+        y = grid.entries[k]
+        
+
+        # safety: return expected change in cost of 0 if already solved
+        if y.solved:
+            return 0.0
+
+        #return expected change in cost of 1 if only one letter is unfilled
+        if y.L -1 == len(y.filled_indices):
+            return 1.0
+        
+        probs = []
+        #calculate probabilities of solving after adding k letters
+        for i in range(0, y.L - len(y.filled_indices)):
+            i_copy = randomly_add_letters(y, i)
+            
+            p_i = model.prob_solve_entry_state(i_copy)
+        
+            probs.append(p_i)
+        
+        C = 0
+        k = len(y.filled_indices)
+
+        for j in range (1, len(probs)):
+            if j == 1:
+                prod = 1
+            else:
+                prod = np.prod([1 - probs[m] for m in range (1, j)])
+
+            C += j*prod*probs[j]
+
+        return 1- probs[0]*C
+
+            
+
+
+
+
+def randomly_add_letters(entry_state: EntryState, k: int) -> EntryState:
+    """
+    Randomly adds k letters to an EntryState by adding k random indices
+    to the filled_indices set. Returns a new EntryState (does not modify original).
+    
+    Args:
+        entry_state: The EntryState to add letters to
+        k: Number of letters to add
+        
+    Returns:
+        New EntryState with k additional random indices filled
+        
+    Raises:
+        ValueError: If k is negative or would exceed available unfilled positions
+    """
+    if k < 0:
+        raise ValueError("k must be non-negative")
+    
+    # Get available unfilled indices
+    all_indices = set(range(entry_state.L))
+    available_indices = all_indices - entry_state.filled_indices
+    
+    if k > len(available_indices):
+        raise ValueError(f"Cannot add {k} letters: only {len(available_indices)} positions available")
+    
+    # Create a copy of the entry state
+    new_entry = copy.deepcopy(entry_state)
+    
+    # Randomly sample k indices to fill
+    if k > 0:
+        indices_to_add = random.sample(list(available_indices), k)
+        new_entry.filled_indices.update(indices_to_add)
+        # Reset guess flag since we're adding new information
+        if indices_to_add:
+            new_entry.guess_with_current_letters = False
+    
+    return new_entry
+
