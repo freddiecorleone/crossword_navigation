@@ -132,7 +132,7 @@ class IsolatedExpectedCost(ValueFunction):
 
             C += j*prod*probs[j]
 
-        return 1- probs[0]*C
+        return -(1- probs[0]*C)
 
             
 

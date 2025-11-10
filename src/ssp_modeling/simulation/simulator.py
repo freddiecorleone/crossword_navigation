@@ -104,7 +104,7 @@ def create_simple_classes():
             for step in range(self.cfg.max_steps):
                 if self.all_solved():
                     break
-                actions = policy.plan_epoch(self.grid, model)
+                actions = policy.plan_epoch(self.grid, model, self.cfg)
                 if not actions:
                     break
                 # Process actions...
@@ -127,7 +127,7 @@ def create_simple_classes():
 def create_simple_policies():
     """Create simple policy classes"""
     class SimplePolicy:
-        def plan_epoch(self, grid, model):
+        def plan_epoch(self, grid, model, config=None):
             unsolved = [eid for eid, e in grid.entries.items() if not e.solved]
             return unsolved[:1] if unsolved else []
         
@@ -220,13 +220,14 @@ if __name__ == "__main__":
     # Try different grid sizes for more variation
     import random
     
-    grid_sizes = [(4, 4), (5, 5), (6, 6), (7, 7)]
+    grid_sizes = [(4, 4)]
     
     for rows, cols in grid_sizes:
         debug_print(f"\n{'='*50}")
         debug_print(f"Testing {rows}x{cols} grid:")
-        value = IsolatedExpectedCost()
-        result = simulate_fill(OneStepRollout(value), rows=rows, cols=cols, seed=random.randint(1, 10000))
+        value = ValueFunction()
+
+        result = simulate_fill(GreedyP(), rows=rows, cols=cols, seed=random.randint(1, 10000))
         debug_print(f"Result: {result.steps} epochs, {result.total_cost} total cost")
         debug_print('='*50)
 

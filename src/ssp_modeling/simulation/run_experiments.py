@@ -62,12 +62,13 @@ def main():
     
     # Test different policies
     policies = [
-        ("OneStep Rollout with Flawed Value Fn", OneStepRollout(value_fn)),
-        ("Onestep Rollout with Improved Value Fn", OneStepRollout(value2))
+        ("Greedy Policy", GreedyP()),
+        ("Onestep Rollout with Improved Value Fn", OneStepRollout(value2)),
+        ("OneStep Rollout with Flawed Value Fn", OneStepRollout(value_fn)) 
     ]
 
-    grid_sizes = [(5, 5), (6, 6), (7, 7), (8, 8)]
-    num_trials = 100
+    grid_sizes = [(6, 6)]
+    num_trials = 10
     avg_costs = []
     for rows, cols in grid_sizes:
         print(f"\n📐 Grid Size: {rows}x{cols} ({num_trials} trials each)")

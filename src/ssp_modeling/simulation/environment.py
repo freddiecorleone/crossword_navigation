@@ -173,19 +173,16 @@ class Environment:
         render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
         debug_print()
         self._print_grid_state()
-        
-        # Get policy's planned order for this epoch
-        full_order = policy.plan_epoch(self.grid, model)
-        order = [
-            i for i in full_order
-            if not self.grid.entries[i].solved
-            and not self.grid.entries[i].guess_with_current_letters
-        ]
-        
-        debug_print(f"🎯 Policy recommends trying: {full_order}")
-        debug_print(f"📋 Available to attempt: {order}")
 
-        if not order:
+
+        #check if any entries are available to attempt
+
+      
+            
+        # Get policy's planned order for this epoch
+        order = policy.plan_epoch(self.grid, model, self.cfg)
+
+        if order == []:
             debug_print("❌ No entries available to attempt - using hint")
             tgt = self._apply_hint()
             debug_print(f"💡 Applied hint to entry '{tgt}'")
@@ -194,40 +191,40 @@ class Environment:
             return EpochOutcome(cost=self.cfg.hint_cost, solved_entry=None,
                                 used_hint=True, attempts_order=[], attempts_taken=0,
                                 info={"hint_target": tgt})
+            
 
-        debug_print(f"🎲 Attempting entries in order...")
-        attempts = 0
-        for entry_id in order:
-            e = self.grid.entries[entry_id]
-            p = max(self.cfg.eps_floor, min(1 - self.cfg.eps_floor, model.prob_solve(self.grid, entry_id)))
-            
-            attempts += 1
-            rv = self.rng.random()
-            
-            debug_print(f"  🎯 Attempt #{attempts}: Entry '{entry_id}' (L={e.L}, filled={len(e.filled_indices)}/{e.L})")
-            debug_print(f"     📊 Model probability: {p:.3f}, Random roll: {rv:.3f}")
-            
-            if rv < p:
+        
+        debug_print(f"🎯 Policy recommends trying: {order}")
+
+
+
+        debug_print(f"🎲 Attempting clue with highest value according to policy .")
+
+        e = self.grid.entries[order[0]]
+        entry_id = order[0]
+        p = max(self.cfg.eps_floor, min(1 - self.cfg.eps_floor, model.prob_solve(self.grid, order[0])))
+        attempts = 1
+        rv = self.rng.random()
+
+        debug_print(f"  🎯 Attempt #{attempts}: Entry '{entry_id}' (L={e.L}, filled={len(e.filled_indices)}/{e.L})")
+        debug_print(f"     📊 Model probability: {p:.3f}, Random roll: {rv:.3f}")
+
+        if rv < p:
                 debug_print(f"     ✅ SUCCESS! Solved entry '{entry_id}'")
                 self._apply_success(entry_id)
                 debug_print(f"     🔗 Crossings updated")
                 debug_print(f"📋 Updated Grid:")
                 render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
-                return EpochOutcome(cost=attempts, solved_entry=entry_id, used_hint=False,
+                return EpochOutcome(cost=self.cfg.solved_correct_cost, solved_entry=entry_id, used_hint=False,
                                     attempts_order=order, attempts_taken=attempts, info={"p": p})
-            else:
-                debug_print(f"     ❌ FAILED - marking as 'guessed with current letters'")
-                e.guess_with_current_letters = True
+        else:
+            debug_print(f"     ❌ FAILED - marking as 'guessed with current letters'")
+            e.guess_with_current_letters = True
 
-        debug_print(f"💔 All attempts failed - using hint")
-        tgt = self._apply_hint()
-        debug_print(f"💡 Applied hint to entry '{tgt}'")
-        print(f"📋 Updated Grid:")
-        render_ascii(self.topo, self.grid, show_numbers=False, filled_marker="X", empty_marker="·")
 
-        return EpochOutcome(cost=self.cfg.hint_cost, solved_entry=None,
-                                used_hint=True, attempts_order=order, attempts_taken=attempts,
-                                info={"hint_target": tgt})
+        return EpochOutcome(cost=self.cfg.solved_incorrect_cost, solved_entry=None,
+                                used_hint=False, attempts_order=order, attempts_taken=attempts,
+                                info={"p": p})
         
 
     def run_episode(self, policy: 'Policy', model: ProbabilityModel) -> EpisodeResult:

@@ -44,6 +44,8 @@ class SimConfig:
     eps_floor: float = 1e-4
     max_steps: int = 10000
     rng_seed: Optional[int] = None
+    solved_correct_cost :int = 1
+    solved_incorrect_cost :int = 1
 
 @dataclass
 class Topology:
