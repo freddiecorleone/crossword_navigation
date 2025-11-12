@@ -1,10 +1,9 @@
 # src/ssp_modeling/simulation# EntryState imported from types.py
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, Any
+from typing import Dict, List, Optional
 import random
-
-from matplotlib.pyplot import grid
+from .policy_core import Policy
 
 # Simple, direct imports - no circular dependencies!
 from .types import (
@@ -14,9 +13,6 @@ from .types import (
 from .debug import debug_print
 
 # Remove the circular import - we'll use TYPE_CHECKING instead
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .policy import Policy
 
 # ---------------------------------------------------------------------
 # Environment (epoch/episode execution)
@@ -29,29 +25,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------
 
 
-
-@dataclass
-class EntryState:
-    """Represents the solver’s current knowledge about one crossword entry."""
-    L: int                                      # total length
-    filled_indices: set[int] = field(default_factory=set)
-    guess_with_current_letters: bool = False
-    solved: bool = False
-
-    @property
-    def k(self) -> int:
-        return len(self.filled_indices)
-
-    @property
-    def u(self) -> int:
-        return self.L - len(self.filled_indices)
-
-# Grid imported from types.py
-
-# SimConfig imported from types.py
-
-
-# ProbabilityModel imported from types.py
 
 
 
@@ -201,6 +174,7 @@ class Environment:
         debug_print(f"🎲 Attempting clue with highest value according to policy .")
 
         e = self.grid.entries[order[0]]
+        e.num_attempts += 1
         entry_id = order[0]
         p = max(self.cfg.eps_floor, min(1 - self.cfg.eps_floor, model.prob_solve(self.grid, order[0])))
         attempts = 1
@@ -227,7 +201,7 @@ class Environment:
                                 info={"p": p})
         
 
-    def run_episode(self, policy: 'Policy', model: ProbabilityModel) -> EpisodeResult:
+    def run_episode(self, policy: Policy, model: ProbabilityModel) -> EpisodeResult:
         total = 0; steps = 0; hints = 0
         log: List[EpochOutcome] = []
         

@@ -6,11 +6,21 @@ to avoid circular import issues.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Protocol, Any
+from typing import Dict, List, Optional, Tuple, Protocol, Any, FrozenSet
 
 # Type aliases
 EntryId = str
 Cell = Tuple[int, int]
+
+
+
+@dataclass
+class SuccessSnapshot:
+    x: EntryId
+    x_prev_solved: bool
+    x_prev_locked: bool
+    # For each neighbor: (prev_locked, prev_filled_indices)
+    neighbor_states: Dict[EntryId, Tuple[bool, FrozenSet[int]]]
 
 @dataclass
 class EntryState:
@@ -19,6 +29,7 @@ class EntryState:
     filled_indices: set[int] = field(default_factory=set)
     guess_with_current_letters: bool = False
     solved: bool = False
+    num_attempts: int = 0
 
     @property
     def k(self) -> int:

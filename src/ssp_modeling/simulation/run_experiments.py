@@ -13,10 +13,14 @@ sys.path.insert(0, str(src_dir))
 
 # Now import everything
 from .simulator import simulate_fill
-from .policy import Policy, GreedyP, OneStepRollout
-from .value import ValueFunction, IsolatedExpectedCost
+from .policy_core import Policy
+from .policies import OneStepRolloutPolicy, NStepRolloutPolicy
+from .value_diff import DifferenceValue, IsolatedExpectedCost
 from ..models.xgb_model import XGBProbability, DummyModel
 from ..utils.path import get_project_root
+from .types import SimConfig
+from .environment import Environment
+
 
 
 def run_experiments(policy: Policy, rows: int, cols: int, num_trials: int, model=None) -> float:
@@ -57,18 +61,16 @@ def main():
         model = DummyModel()
     
     # Create value function
-    value_fn = ValueFunction()
-    value2 = IsolatedExpectedCost()
+    value_fn = IsolatedExpectedCost()
     
     # Test different policies
     policies = [
-        ("Greedy Policy", GreedyP()),
-        ("Onestep Rollout with Improved Value Fn", OneStepRollout(value2)),
-        ("OneStep Rollout with Flawed Value Fn", OneStepRollout(value_fn)) 
+        ("Two step rollout", NStepRolloutPolicy(value_fn, depth=2)),
+        ("OneStep rollout", OneStepRolloutPolicy(value_fn))
     ]
 
-    grid_sizes = [(6, 6)]
-    num_trials = 10
+    grid_sizes = [(5, 5)]
+    num_trials = 25
     avg_costs = []
     for rows, cols in grid_sizes:
         print(f"\n📐 Grid Size: {rows}x{cols} ({num_trials} trials each)")

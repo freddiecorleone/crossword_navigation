@@ -67,14 +67,19 @@ class XGBProbability(ProbabilityModel):
     Use trained XGBoost model with proper scaler (loaded from .pkl file).
     Requires xgboost, numpy, pandas, and scikit-learn to be installed.
     """
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: Optional[str] = None):
         try:
             import pickle
             import pandas as pd
+            from pathlib import Path
         except Exception as e:
-            raise RuntimeError("pickle and pandas must be installed to use XGBProbability") from e
+            raise RuntimeError("pickle, pandas, and pathlib must be installed to use XGBProbability") from e
+        
+        # Use default path if none provided
         if model_path is None:
-            model_path = "ssp_modeling/models/xgb_model.pkl"
+            from ..utils.path import get_project_root
+            model_path = get_project_root() / "data" / "processed" / "crossword_model.pkl"
+        
         # Load the full model with scaler from .pkl file
         with open(model_path, 'rb') as f:
             model_data = pickle.load(f)
@@ -84,11 +89,19 @@ class XGBProbability(ProbabilityModel):
         self.feature_names = model_data['feature_names']
         self.pd = pd
 
-    def prob_solve(self, grid: Grid, entry_id: EntryId, entry_state: Optional[EntryState] = None) -> float:
+    def prob_solve(self, grid_or_entry: Union[Grid, EntryState], entry_id: Optional[EntryId] = None, entry_state: Optional[EntryState] = None) -> float:
         """
-        Calculate solve probability from Grid and EntryId.
-        If entry_state is provided, use it directly. Otherwise, extract from grid.
+        Calculate solve probability. Can be called in two ways:
+        1. prob_solve(grid, entry_id, entry_state=None) - traditional way
+        2. prob_solve(entry_state) - direct EntryState usage
         """
+        # Check if first argument is an EntryState (new usage)
+        # We check for EntryState by looking for its attributes
+        if hasattr(grid_or_entry, 'L') and hasattr(grid_or_entry, 'filled_indices') and not hasattr(grid_or_entry, 'entries'):
+            return self.prob_solve_entry_state(grid_or_entry)
+        
+        # Traditional usage with Grid and EntryId
+        grid = grid_or_entry
         f = make_features(grid, entry_id, entry_state)
         
         # Create DataFrame with proper feature names and order
