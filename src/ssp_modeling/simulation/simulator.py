@@ -10,8 +10,8 @@ import sys
 import os
 from pathlib import Path
 from .debug import debug_print
-from .value_diff import IsolatedExpectedCost
 from .environment import Environment
+from .value_diff import HintAwareExpectedCostDifference
 
 
 
@@ -36,6 +36,45 @@ def reset():
         from .memo import TTABLE
         TTABLE.clear()   # clear global memo
 
+# Environment pool for better memory management
+_environment_pool = []
+_pool_max_size = 50  # Keep up to 50 environments in pool
+
+def _get_pooled_environment(rows: int, cols: int, seed: Optional[int] = None) -> Environment:
+    """Get environment from pool or create new one."""
+    global _environment_pool
+    
+    # Try to find matching environment in pool
+    for i, (env, env_rows, env_cols) in enumerate(_environment_pool):
+        if env_rows == rows and env_cols == cols:
+            # Remove from pool and reset it
+            _environment_pool.pop(i)
+            _reset_environment(env, seed)
+            return env
+    
+    # No matching environment found, create new one
+    return make_random_env(rows, cols, seed)
+
+def _return_environment_to_pool(env: Environment, rows: int, cols: int):
+    """Return environment to pool for reuse."""
+    global _environment_pool
+    
+    if len(_environment_pool) < _pool_max_size:
+        _environment_pool.append((env, rows, cols))
+
+def _reset_environment(env: Environment, seed: Optional[int] = None):
+    """Reset environment state for reuse."""
+    # Reset all entries to unsolved state
+    for entry in env.grid.entries.values():
+        entry.filled_indices.clear()
+        entry.solved = False
+        entry.guess_with_current_letters = False
+        entry.num_attempts = 0
+    
+    # Reset config seed if provided
+    if seed is not None:
+        env.cfg.rng_seed = seed
+
 
 
 def make_random_env(rows = 5, cols= 5, seed: Optional[int] = random.randint(1, 100000)):
@@ -47,34 +86,7 @@ def make_random_env(rows = 5, cols= 5, seed: Optional[int] = random.randint(1, 1
     return Environment(grid=grid_obj, topo=topo, cfg=cfg)
 
 
-def make_toy_env(seed: Optional[int] = None):
-    """Create a simple 3-entry crossword environment"""
-    # Get the classes we need
-    Environment, EntryState, Grid, SimConfig = get_environment_classes()
-    
-    entries = {
-        "A1": EntryState(L=5, filled_indices=set()),
-        "D1": EntryState(L=4, filled_indices=set()),  
-        "D2": EntryState(L=3, filled_indices=set()),
-    }
-    crossings = {
-        "A1": {"D1": [0], "D2": [3]},
-        "D1": {"A1": [0]},
-        "D2": {"A1": [0]},
-    }
-    grid = Grid(entries=entries, crossings=crossings)
-    cfg = SimConfig(rng_seed=seed, hint_cost=1)
-    
-    # Create a simple topology for the toy example
-    topo = Topology(
-        shape=(3, 5),  # Approximating a 3x5 grid
-        layout=[[0]*5 for _ in range(3)],  # All white for simplicity
-        entry_cells={},  # Could populate this but not needed for basic sim
-        cell_to_entries={},
-        numbers={}
-    )
-    
-    return Environment(grid=grid, topo=topo, cfg=cfg)
+
 
 def simulate_fill(policy: Policy, rows = 5, cols = 5, seed: Optional[int] = None, model: Optional[ProbabilityModel] = None) -> EpisodeResult:
 
@@ -83,7 +95,8 @@ def simulate_fill(policy: Policy, rows = 5, cols = 5, seed: Optional[int] = None
         print(f"Loading model from: {model_path}")
         model = XGBProbability(model_path=model_path)
     
-    env = make_random_env(rows = rows, cols = cols, seed=seed)
+    # Use pooled environment for better memory management
+    env = _get_pooled_environment(rows, cols, seed)
     
     # Debug: Print grid info
     debug_print(f"🔍 Grid Debug - Seed: {seed}")
@@ -95,6 +108,10 @@ def simulate_fill(policy: Policy, rows = 5, cols = 5, seed: Optional[int] = None
     
     result = env.run_episode(policy, model)
     reset()
+    
+    # Return environment to pool for reuse
+    _return_environment_to_pool(env, rows, cols)
+    
     print(f"🎯 Result: {result.steps} epochs, {result.total_cost} total cost")
     return result 
 
@@ -107,7 +124,7 @@ if __name__ == "__main__":
     for rows, cols in grid_sizes:
         debug_print(f"\n{'='*50}")
         debug_print(f"Testing {rows}x{cols} grid:")
-        value = IsolatedExpectedCost()
+        value = HintAwareExpectedCostDifference()
 
         result = simulate_fill(NStepRolloutPolicy(value=value, depth=2), rows=rows, cols=cols, seed=random.randint(1, 10000))
         debug_print(f"Result: {result.steps} epochs, {result.total_cost} total cost")

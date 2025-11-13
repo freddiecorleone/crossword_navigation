@@ -38,6 +38,23 @@ class EntryState:
     @property
     def u(self) -> int:
         return self.L - len(self.filled_indices)
+    
+    def fast_copy(self) -> 'EntryState':
+        """Fast copy method optimized for performance."""
+        return EntryState(
+            L=self.L,
+            filled_indices=self.filled_indices.copy(),
+            guess_with_current_letters=self.guess_with_current_letters,
+            solved=self.solved,
+            num_attempts=self.num_attempts
+        )
+    
+    def reset_to_empty(self):
+        """Reset entry to empty state for reuse."""
+        self.filled_indices.clear()
+        self.guess_with_current_letters = False
+        self.solved = False
+        self.num_attempts = 0
 
 @dataclass
 class Grid:

@@ -17,13 +17,23 @@ class OneStepRolloutPolicy(Policy):
         cand = active_entries(grid)
         if not cand:
             return []
-        # Compute per-x scores
+        
+        # Use batch solving if available
+        if hasattr(model, 'prob_solve_batch'):
+            batch_data = [(grid, x) for x in cand]
+            probs = model.prob_solve_batch(batch_data)
+        else:
+            # Fallback to individual calls
+            probs = [model.prob_solve(grid, x) for x in cand]
+        
+        # Compute per-x scores with batch probabilities
         rows = []
-        for x in cand:
-            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, model.prob_solve(grid, x)))
+        for i, x in enumerate(cand):
+            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, probs[i]))
             c_exp = expected_immediate_cost(p, cfg)
-            dV = self.value.delta_depth0(grid, model, x, cfg)
+            dV = self.value.delta_depth0(grid, model, x)
             rows.append({"name": x, "score": c_exp + p*dV, "p": p, "c_exp": c_exp, "delta": dV})
+        
         rows.sort(key=lambda r: r["score"])
         return rows if self.return_scores else [r["name"] for r in rows]
 
@@ -48,11 +58,19 @@ class NStepRolloutPolicy(Policy):
 
         M_s, _ = compute_M(grid, model, cfg, self.value, self.depth - 1)
 
+        # Get probabilities for all candidates at once
+        if hasattr(model, 'prob_solve_batch'):
+            batch_data = [(grid, x) for x in cand]
+            probs = model.prob_solve_batch(batch_data)
+        else:
+            # Fallback to individual calls
+            probs = [model.prob_solve(grid, x) for x in cand]
+
         rows = []
-        for x in cand:
-            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, model.prob_solve(grid, x)))
+        for i, x in enumerate(cand):
+            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, probs[i]))
             c_exp = expected_immediate_cost(p, cfg)
-            dV = self.value.delta_depth0(grid, model, x, cfg)
+            dV = self.value.delta_depth0(grid, model, x)
 
             snap = apply_success_inplace(grid, x)
             try:
@@ -84,7 +102,7 @@ def compute_M(grid: Grid, model: ProbabilityModel, cfg: SimConfig,
     hit = TTABLE.get(key)
     if hit is not None:
 
-        print("Used memoization")
+        
         return hit  # (M_value, argmin_x)
 
     cand = [i for i,e in grid.entries.items() if not e.solved and not e.guess_with_current_letters]
@@ -102,28 +120,45 @@ def compute_M(grid: Grid, model: ProbabilityModel, cfg: SimConfig,
     # Depth-1: pure one-step (ΔV only)
     if depth == 1:
         best = float("inf"); best_x = None
-        for x in cand:
-            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, model.prob_solve(grid, x)))
+        
+        # Use batch solving if available
+        if hasattr(model, 'prob_solve_batch'):
+            batch_data = [(grid, x) for x in cand]
+            probs = model.prob_solve_batch(batch_data)
+        else:
+            # Fallback to individual calls
+            probs = [model.prob_solve(grid, x) for x in cand]
+        
+        for i, x in enumerate(cand):
+            p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, probs[i]))
             c_exp = p*cfg.solved_correct_cost + (1.0-p)*cfg.solved_incorrect_cost
-            dV = value.delta_depth0(grid, model, x, cfg)  # ΔV(x) = hatV(s_x)-hatV(s)
+            dV = value.delta_depth0(grid, model, x)  # ΔV(x) = hatV(s_x)-hatV(s)
             score = c_exp + p * dV
             if score < best:
                 best, best_x = score, x
 
-            TTABLE[key] = (best, best_x)
+        TTABLE[key] = (best, best_x)
         return (best, best_x)
 
     # Depth>1
     # 1) Compute M_{d-1}(s) once
     M_s, _ = compute_M(grid, model, cfg, value, depth-1)
 
-    best = float("inf"); best_x = None
-    for x in cand:
-        p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, model.prob_solve(grid, x)))
-        c_exp = p*cfg.solved_correct_cost + (1.0-p)*cfg.solved_incorrect_cost
-        dV = value.delta_depth0(grid, model, x, cfg)
+    # 2) Get probabilities for all candidates at once
+    if hasattr(model, 'prob_solve_batch'):
+        batch_data = [(grid, x) for x in cand]
+        probs = model.prob_solve_batch(batch_data)
+    else:
+        # Fallback to individual calls
+        probs = [model.prob_solve(grid, x) for x in cand]
 
-        # 2) Hypothetically solve x → s_x, compute M_{d-1}(s_x), rollback
+    best = float("inf"); best_x = None
+    for i, x in enumerate(cand):
+        p = max(cfg.eps_floor, min(1.0 - cfg.eps_floor, probs[i]))
+        c_exp = p*cfg.solved_correct_cost + (1.0-p)*cfg.solved_incorrect_cost
+        dV = value.delta_depth0(grid, model, x)
+
+        # 3) Hypothetically solve x → s_x, compute M_{d-1}(s_x), rollback
         snap = apply_success_inplace(grid, x)   # in-place, fast
         try:
             M_sx, _ = compute_M(grid, model, cfg, value, depth-1)
@@ -133,7 +168,8 @@ def compute_M(grid: Grid, model: ProbabilityModel, cfg: SimConfig,
         score = c_exp + p * (dV + M_sx - M_s)   # <-- correct two-step / n-step formula
         if score < best:
             best, best_x = score, x
-        TTABLE[key] = (best, best_x)
+            
+    TTABLE[key] = (best, best_x)
     return (best, best_x)     
 
 
@@ -150,20 +186,64 @@ class GreedyPPolicy(Policy):
     """Order by descending p(x), return full order."""
     def plan_epoch(self, grid: Grid, model: ProbabilityModel, cfg: SimConfig) -> List[EntryId]:
         cand = active_entries(grid)
-        cand.sort(key=lambda x: model.prob_solve(grid, x), reverse=True)
+        if not cand:
+            return []
+        
+        # Use batch solving for efficiency
+        if hasattr(model, 'prob_solve_batch'):
+            batch_data = [(grid, x) for x in cand]
+            probs = model.prob_solve_batch(batch_data)
+        elif hasattr(model, 'prob_solve_many'):
+            probs = model.prob_solve_many(grid, cand)
+        else:
+            # Fallback to individual calls
+            probs = [model.prob_solve(grid, x) for x in cand]
+        
+        pairs = list(zip(cand, probs))
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in pairs]
+            
+
+        
         return cand
 
 
 
-class expectedLettersGainedPolicy(Policy):
+class ExpectedLettersGainedPolicy(Policy):
     """Order by expected letters gained, return full order."""
     def plan_epoch(self, grid: Grid, model: ProbabilityModel, cfg: SimConfig) -> List[EntryId]:
         cand = active_entries(grid)
-            
-        cand.sort(key=lambda x: self.expected_letters(model, grid, x), reverse=True)
-        return cand
+        if not cand:
+            return []
+        
+        # Use batch solving for efficiency
+        if hasattr(model, 'prob_solve_batch'):
+            batch_data = [(grid, x) for x in cand]
+            probs = model.prob_solve_batch(batch_data)
+        else:
+            # Fallback to individual calls
+            probs = [model.prob_solve(grid, x) for x in cand]
+        
+        # Calculate expected letters gained for each entry
+        expected_gains = []
+        for i, x in enumerate(cand):
+            entry = grid.entries[x]
+            expected_gain = probs[i] * (entry.L - len(entry.filled_indices))
+            expected_gains.append((x, expected_gain))
+        
+        # Sort by expected gain (descending)
+        expected_gains.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in expected_gains]
     
-    def expected_letters(self, model: ProbabilityModel, grid: Grid, entry_id: EntryId) -> float:
-        entry = grid.entries[entry_id]
-        p = model.prob_solve(grid, entry_id)
-        return p * (entry.L - len(entry.filled_indices))
+
+
+class RandomPolicy(Policy):
+    """Return a random ordering of active entries."""
+    def __init__(self, rng_seed: int | None = None):
+        import random
+        self.rng = random.Random(rng_seed)
+
+    def plan_epoch(self, grid: Grid, model: ProbabilityModel, cfg: SimConfig) -> List[EntryId]:
+        cand = active_entries(grid)
+        self.rng.shuffle(cand)
+        return cand

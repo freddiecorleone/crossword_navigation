@@ -1,11 +1,14 @@
-from .value_diff import create_sequence_of_entries, IsolatedExpectedCost
+from .value_diff import HintAwareExpectedCostDifference
 from .types import Grid, EntryState, SimConfig, Topology, EpisodeResult, ProbabilityModel
-from .policies import OneStepRolloutPolicy, NStepRolloutPolicy
+from .policies import OneStepRolloutPolicy, NStepRolloutPolicy, ExpectedLettersGainedPolicy
+from.policy_core import apply_success_inplace
 from ..models.xgb_model import XGBProbability
+from .grid_generator import generate_grid
+from .environment import render_ascii
 
 
 entries = {
-        "A1": EntryState(L=5, filled_indices=set()),
+        "A1": EntryState(L=4, filled_indices=set()),
         "D1": EntryState(L=4, filled_indices=set()),  
         "D2": EntryState(L=3, filled_indices=set()),
     }
@@ -16,18 +19,28 @@ crossings = {
     }
 
 simConfig = SimConfig(hint_cost=0, solved_correct_cost=1, solved_incorrect_cost=1)
-grid = Grid(entries=entries, crossings=crossings)
-targets = ["D2", "D1", "A1"]
 
 
-IsolatedCostModel = IsolatedExpectedCost()
+grid, topo = generate_grid(rows=5, cols=5, return_topology=True)
+
+apply_success_inplace(grid, "A1")
+render_ascii(grid=grid,topo=topo)
+
+value = HintAwareExpectedCostDifference(simConfig)
 model = XGBProbability()
-policy = NStepRolloutPolicy(value=IsolatedCostModel, depth=2)
-
-recommended_order = policy.plan_epoch(grid, model, simConfig)
-print("Recommended order:", recommended_order)
 
 
 
+policy = OneStepRolloutPolicy(value=value)
+
+policy2 = ExpectedLettersGainedPolicy()
+
+for id in grid.entries.keys():
+    print(f"Entry {id}: {value.delta_depth0(grid=grid, model=model, x=id)}")
+    print(f"Entry {id} (prob_solve): {model.prob_solve(grid, id)}")
+    print("Length:", grid.entries[id].L)
+print(policy.plan_epoch(grid, model, simConfig))
+
+print(policy2.plan_epoch(grid, model, simConfig))
 
         

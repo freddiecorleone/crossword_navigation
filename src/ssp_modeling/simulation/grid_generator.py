@@ -21,6 +21,7 @@ def generate_grid(
     max_restarts: int = 200,
     rng: Optional[random.Random] = None,
     return_topology: bool = False,
+    shape_style: str = "random",
 ) -> Union[Grid, Tuple[Grid, Topology]]:
     """
     Generate a random crossword layout and return your Grid object (and optionally Topology).
@@ -43,6 +44,7 @@ def generate_grid(
       max_restarts         : how many random attempts before giving up
       rng                  : optional random.Random instance to make generation reproducible
       return_topology      : if True, also return a Topology object for visualization/numbering
+      shape_style          : "random", "cross", "diamond", "rings", "spiral", "maze", or "auto"
 
     Prereqs (provided elsewhere in this module/snippet):
       - _random_layout(rows, cols, min_entry_len, symmetric, target_black_frac, rng) -> layout|None
@@ -55,13 +57,27 @@ def generate_grid(
     
     rng = rng or random.Random()
 
+    # Choose shape style automatically for larger grids if "auto"
+    if shape_style == "auto":
+        if min(rows, cols) >= 15:
+            shape_style = rng.choice(["cross", "diamond", "rings", "spiral", "maze", "random"])
+        elif min(rows, cols) >= 11:
+            shape_style = rng.choice(["cross", "diamond", "random", "random"])  # More random for medium grids
+        else:
+            shape_style = "random"
+    
+    # Increase max_restarts for shaped grids
+    if shape_style != "random":
+        max_restarts = max(max_restarts, 500)
+
     for _ in range(max_restarts):
-        layout = _random_layout(
+        layout = _generate_shaped_layout(
             R=rows,
             C=cols,
             Lmin=min_entry_len,
             symmetric=symmetric,
             target_black_frac=target_black_frac,
+            shape_style=shape_style,
             rng=rng,
         )
         if layout is None:
@@ -82,6 +98,186 @@ def generate_grid(
         "increase max_restarts, lower min_entry_len (>=3), or adjust target_black_frac (e.g., 0.14–0.20)."
     )
 
+
+def _generate_shaped_layout(
+    R: int,
+    C: int,
+    Lmin: int,
+    symmetric: bool,
+    target_black_frac: float,
+    shape_style: str,
+    rng: random.Random,
+) -> Optional[List[List[int]]]:
+    """Generate layout with interesting shapes."""
+    if shape_style == "random":
+        return _random_layout(R, C, Lmin, symmetric, target_black_frac, rng)
+    
+    # Start with base template
+    base_template = _create_shape_template(R, C, shape_style, rng)
+    
+    # Refine the template with random additions
+    return _refine_template_layout(base_template, R, C, Lmin, symmetric, target_black_frac, rng)
+
+def _create_shape_template(R: int, C: int, shape_style: str, rng: random.Random) -> List[List[int]]:
+    """Create base shape template with crossword-friendly patterns."""
+    g = [[0 for _ in range(C)] for _ in range(R)]
+    
+    if shape_style == "cross":
+        # Subtle cross pattern - just a few strategic blacks
+        mid_r, mid_c = R // 2, C // 2
+        
+        # Add some blacks around the center to suggest a cross
+        cross_positions = [
+            (mid_r - 2, mid_c), (mid_r + 2, mid_c),  # Vertical line hints
+            (mid_r, mid_c - 2), (mid_r, mid_c + 2),  # Horizontal line hints
+            (mid_r - 1, mid_c - 1), (mid_r - 1, mid_c + 1),  # Diagonal accents
+            (mid_r + 1, mid_c - 1), (mid_r + 1, mid_c + 1),
+        ]
+        
+        for r, c in cross_positions:
+            if 0 <= r < R and 0 <= c < C:
+                g[r][c] = 1
+    
+    elif shape_style == "diamond":
+        # Subtle diamond pattern
+        mid_r, mid_c = R // 2, C // 2
+        
+        # Diamond corners and edges
+        diamond_positions = [
+            (mid_r - 3, mid_c), (mid_r + 3, mid_c),  # Top/bottom points
+            (mid_r, mid_c - 3), (mid_r, mid_c + 3),  # Left/right points
+            (mid_r - 2, mid_c - 1), (mid_r - 2, mid_c + 1),  # Upper edges
+            (mid_r + 2, mid_c - 1), (mid_r + 2, mid_c + 1),  # Lower edges
+            (mid_r - 1, mid_c - 2), (mid_r + 1, mid_c - 2),  # Left edges
+            (mid_r - 1, mid_c + 2), (mid_r + 1, mid_c + 2),  # Right edges
+        ]
+        
+        for r, c in diamond_positions:
+            if 0 <= r < R and 0 <= c < C:
+                g[r][c] = 1
+    
+    elif shape_style == "rings":
+        # Subtle ring pattern - just strategic placements
+        mid_r, mid_c = R // 2, C // 2
+        
+        # Create ring-like patterns at different distances
+        for r in range(R):
+            for c in range(C):
+                dist = max(abs(r - mid_r), abs(c - mid_c))
+                # Sparse ring pattern
+                if dist in [2, 4] and (r + c) % 3 == 0:
+                    g[r][c] = 1
+    
+    elif shape_style == "spiral":
+        # Gentle spiral - just key positions
+        mid_r, mid_c = R // 2, C // 2
+        
+        # Create a loose spiral pattern
+        spiral_positions = []
+        r, c = mid_r, mid_c
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+        direction_idx = 0
+        steps = 1
+        
+        for _ in range(8):  # Limited spiral
+            dr, dc = directions[direction_idx]
+            for _ in range(steps):
+                if 0 <= r < R and 0 <= c < C:
+                    spiral_positions.append((r, c))
+                r += dr
+                c += dc
+            direction_idx = (direction_idx + 1) % 4
+            if direction_idx % 2 == 0:
+                steps += 1
+        
+        # Only place blacks at every 3rd position to keep it sparse
+        for i, (r, c) in enumerate(spiral_positions):
+            if i % 3 == 0 and 0 <= r < R and 0 <= c < C:
+                g[r][c] = 1
+    
+    elif shape_style == "maze":
+        # Maze-like but crossword friendly
+        # Create strategic barriers that suggest corridors
+        for r in range(1, R - 1, 4):  # Every 4th row
+            for c in range(2, C - 2, 3):  # Staggered columns
+                if rng.random() < 0.6:  # Not all positions
+                    g[r][c] = 1
+        
+        for c in range(1, C - 1, 4):  # Every 4th column  
+            for r in range(2, R - 2, 3):  # Staggered rows
+                if rng.random() < 0.6:  # Not all positions
+                    g[r][c] = 1
+    
+    return g
+
+def _refine_template_layout(
+    template: List[List[int]],
+    R: int,
+    C: int, 
+    Lmin: int,
+    symmetric: bool,
+    target_black_frac: float,
+    rng: random.Random,
+) -> Optional[List[List[int]]]:
+    """Use template as bias for random layout generation."""
+    # Instead of starting with the template, start fresh and use template as probability bias
+    g = [[0 for _ in range(C)] for _ in range(R)]
+    
+    target_blacks = round(target_black_frac * R * C)
+    
+    # Create weighted candidate list based on template
+    weighted_cells = []
+    for r in range(R):
+        for c in range(C):
+            # Template positions get higher probability
+            weight = 3 if template[r][c] == 1 else 1
+            for _ in range(weight):
+                weighted_cells.append((r, c))
+    
+    rng.shuffle(weighted_cells)
+    
+    def mirror(rc: Cell) -> Cell:
+        return (R - 1 - rc[0], C - 1 - rc[1])
+    
+    placed = 0
+    for (r, c) in weighted_cells:
+        if g[r][c] == 1:
+            continue
+
+        to_place = [(r, c)]
+        if symmetric:
+            mr, mc = mirror((r, c))
+            if (mr, mc) != (r, c):
+                to_place.append((mr, mc))
+
+        # Tentatively place blacks
+        ok = True
+        for rr, cc in to_place:
+            if g[rr][cc] == 1:
+                continue
+            g[rr][cc] = 1
+
+            # Check local constraints on affected row and column
+            if not (_row_ok(g, rr, Lmin) and _col_ok(g, cc, Lmin)):
+                ok = False
+
+        if not ok:
+            # Revert
+            for rr, cc in to_place:
+                g[rr][cc] = 0
+            continue
+
+        # Accept
+        placed += sum(1 for rr, cc in to_place if g[rr][cc] == 1)
+
+        if placed >= target_blacks:
+            break
+
+    # Final pass: if the grid contains any 1- or 2-length segments, reject
+    if not _all_rows_ok(g, Lmin) or not _all_cols_ok(g, Lmin):
+        return None
+
+    return g
 
 def _random_layout(
     R: int,

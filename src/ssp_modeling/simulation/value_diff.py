@@ -4,190 +4,168 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, List
 from .environment import Grid, EntryId, ProbabilityModel, SimConfig
 from .types import EntryState
-from .policy_core import active_entries, DifferenceValue, expected_immediate_cost, get_impacted_crossings
+from .policy_core import DifferenceValue, apply_success_inplace, rollback_success
 import copy
 import random
 
 
-class IsolatedExpectedCost(DifferenceValue):
+
+# value_hint_expected_cost.py
+from dataclasses import dataclass
+from typing import Dict, Tuple, List, Optional
+# assumes you have: Grid, EntryId, EntryState, ProbabilityModel, SimConfig
+# and apply_success_inplace / rollback_success for success transitions.
+
+def mask_from_entry(e: "EntryState") -> int:
+    m = 0
+    for i in e.filled_indices:
+        m |= (1 << i)
+    return m
+
+def unrevealed_positions(L: int, mask: int) -> List[int]:
+    return [i for i in range(L) if not (mask >> i) & 1]
+
+@dataclass
+class EntrySnapshot:
+    locked: bool
+    filled_mask: int
+    solved: bool
+
+def snapshot_entry(e: "EntryState") -> EntrySnapshot:
+    return EntrySnapshot(
+        locked=e.guess_with_current_letters,
+        filled_mask=mask_from_entry(e),
+        solved=e.solved,
+    )
+
+def restore_entry(e: "EntryState", snap: EntrySnapshot) -> None:
+    # reconstruct set from mask
+    new_set = set()
+    m = snap.filled_mask
+    idx = 0
+    while m:
+        if m & 1: new_set.add(idx)
+        m >>= 1; idx += 1
+    e.filled_indices = new_set
+    e.guess_with_current_letters = snap.locked
+    e.solved = snap.solved
+
+class HintAwareExpectedCostDifference(DifferenceValue):
     """
-   
+    ΔV(x) for hint-aware surrogate:
+        hatV(s) = sum_{active entries j} E_j(mask_j)
+    where E_j(mask) follows:
+        E(mask) = p(mask)*c_s + (1-p(mask))*(c_f + h + Avg_{pos in unrevealed} E(mask ∪ {pos}))
+    We compute ΔV(x) locally: x + neighbors(x) only.
     """
-    def delta_depth0(self, grid: Grid, model: ProbabilityModel, x: EntryId, config: SimConfig) -> float:
-        # mark x as solved and compute isolated expected cost
-        p = max(1e-8, min(1-1e-8, model.prob_solve(grid, x)))
-        #get all the neighbors that have unfilled crossing squares with i:
-        unfilled_neighbors = []
-        for neighbor, indices in grid.crossings.get(x, {}).items():
-            
-            #get crossing index for neighbor:
-            neighbor_crosspoints = grid.crossings[neighbor][x]
-            
-            #get filled indices for neighbor
-            neighbor_filled_indices = grid.entries[neighbor].filled_indices
-            
-            if any(crosspoint not in neighbor_filled_indices for crosspoint in neighbor_crosspoints):
-                unfilled_neighbors.append((neighbor, neighbor_crosspoints))
 
-       
-        changes_in_expected_costs = []
-        for neighbor, crosspoints in unfilled_neighbors:
+    def __init__(self, cfg: "SimConfig", use_mc: bool = False, mc_samples: int = 16, rng_seed: int = 0):
+        self.cfg = cfg
+        self.use_mc = use_mc
+        self.mc_samples = mc_samples
+        import random
+        self.rng = random.Random(rng_seed)
+        # memo: (entry_id, mask_int) -> expected cost E
+        self.memo: Dict[Tuple[str, int], float] = {}
 
-            filling_sequence = create_sequence_of_entries(
-                grid,
-                neighbor,
-                crosspoints
-            )
-            
-            probabilities = [model.prob_solve(filling_sequence[i]) for i in range(len(filling_sequence))]
-            probabilities[-1] = 1
-            
-            expected_costs = []
+    # --- probability helper (uses current grid features) ---
+    def _p_for_mask(self, grid: "Grid", model: "ProbabilityModel", entry_id: str, mask: int, eps: float) -> float:
+        e = grid.entries[entry_id]
+        # snapshot then temporarily set filled_indices to match 'mask'
+        snap = snapshot_entry(e)
+        try:
+            # rebuild set from mask quickly
+            new_set = set()
+            m = mask; idx = 0
+            while m:
+                if (m & 1): new_set.add(idx)
+                m >>= 1; idx += 1
+            e.filled_indices = new_set
+            e.solved = (len(e.filled_indices) == e.L)
+            e.guess_with_current_letters = False  # after a hint we allow a new guess
+            p = model.prob_solve(grid, entry_id)
+            p = max(eps, min(1.0 - eps, p))
+        finally:
+            restore_entry(e, snap)
+        return p
 
-            e_final = 0
-          
-            expected_costs.append(e_final)
-        
+    # --- single-entry expected cost E(entry_id, mask) with memoization ---
+    def E_entry(self, grid: "Grid", model: "ProbabilityModel", entry_id: str, mask: int) -> float:
+        key = (entry_id, mask)
+        if key in self.memo:
+            return self.memo[key]
 
-            for i in range(2, len(probabilities) + 1):
-                ind = len(probabilities) - i
-                e_next = (expected_costs[-1] + config.solved_incorrect_cost + config.hint_cost) * (1 - probabilities[ind]) + probabilities[ind] * (config.solved_correct_cost)
-                expected_costs.append(e_next)
+        e = grid.entries[entry_id]
+        L = e.L
+        k = L - bin(mask).count("1")
+        if k == 0:
+            self.memo[key] = 0.0
+            return 0.0
 
-            
-            expected_costs.reverse()
-            added_letters = len(crosspoints)
-            change_in_expected_cost = expected_costs[added_letters] - expected_costs[0]
-            changes_in_expected_costs.append(change_in_expected_cost)
-        
-        total_change = sum(changes_in_expected_costs)
+        p = self._p_for_mask(grid, model, entry_id, mask, self.cfg.eps_floor)
+        cs, cf, h = self.cfg.solved_correct_cost, self.cfg.solved_incorrect_cost, self.cfg.hint_cost
 
-        return total_change
+        if not self.use_mc:
+            # exact averaging over all unrevealed positions
+            U = unrevealed_positions(L, mask)
+            # average E over adding each pos
+            acc = 0.0
+            for pos in U:
+                next_mask = mask | (1 << pos)
+                acc += self.E_entry(grid, model, entry_id, next_mask)
+            avg_next = acc / len(U)
+        else:
+            # Monte Carlo over hint placements (if you insist)
+            U = unrevealed_positions(L, mask)
+            if not U:
+                avg_next = 0.0
+            else:
+                acc = 0.0
+                for _ in range(min(self.mc_samples, len(U))):
+                    pos = self.rng.choice(U)
+                    next_mask = mask | (1 << pos)
+                    acc += self.E_entry(grid, model, entry_id, next_mask)
+                avg_next = acc / min(self.mc_samples, max(1, len(U)))
 
-        
+        val = p*cs + (1.0 - p)*(cf + h + avg_next)
+        self.memo[key] = val
+        return val
 
+    # --- ΔV(x): local difference using E_entry ---
+    def delta_depth0(self, grid: "Grid", model: "ProbabilityModel", x: EntryId) -> float:
+        ex = grid.entries[x]
+        if ex.solved or ex.guess_with_current_letters:
+            return 0.0
 
+        # affected ids: x and neighbors
+        neighbors = list(grid.crossings.get(x, {}).keys())
 
-        
-        return 
+        affected = neighbors
 
+        # baseline E for affected
+        base: Dict[str, float] = {}
+        for j in affected:
+            ej = grid.entries[j]
+            if ej.solved:
+                base[j] = 0.0
+            else:
+                base[j] = self.E_entry(grid, model, j, mask_from_entry(ej))
 
+        # apply hypothetical success on x (mark solved, propagate crossings to neighbors)
+        snap = apply_success_inplace(grid, x)
+        try:
+            after: Dict[str, float] = {}
+            for j in affected:
+                ej = grid.entries[j]
+                if ej.solved:
+                    after[j] = 0.0
+                else:
+                    after[j] = self.E_entry(grid, model, j, mask_from_entry(ej))
+        finally:
+            rollback_success(grid, snap)
 
-
-  
-    
-def create_sequence_of_entries(
-    grid: Grid,
-    entry_id: EntryId,
-    indices_to_fill: List[int],
-    seed: Optional[int] = None
-) -> List[EntryState]:
-    """
-    Creates a sequence of EntryStates starting from the original entry state,
-    progressively adding indices from indices_to_fill, then randomly filling
-    remaining positions until the entry is complete.
-    
-    Args:
-        grid: The grid containing the entry
-        entry_id: The ID of the entry to create sequence for
-        indices_to_fill: List of specific indices to fill first (in order)
-        seed: Optional random seed for reproducible results
-        
-    Returns:
-        List of EntryState objects showing progression from original to fully filled
-        
-    Raises:
-        KeyError: If entry_id not found in grid
-        ValueError: If indices_to_fill contains invalid indices or duplicates
-    """
-    # Error checking
-    if entry_id not in grid.entries:
-        raise KeyError(f"Entry ID '{entry_id}' not found in grid")
-    
-    original_entry = grid.entries[entry_id]
-    
-    # Validate indices_to_fill
-    if indices_to_fill:
-        invalid_indices = [idx for idx in indices_to_fill if idx < 0 or idx >= original_entry.L]
-        if invalid_indices:
-            raise ValueError(f"Invalid indices {invalid_indices} for entry of length {original_entry.L}")
-        
-        if len(set(indices_to_fill)) != len(indices_to_fill):
-            raise ValueError("indices_to_fill contains duplicates")
-        
-        already_filled = [idx for idx in indices_to_fill if idx in original_entry.filled_indices]
-        if already_filled:
-            raise ValueError(f"Indices {already_filled} are already filled in the original entry")
-    
-    # Set random seed if provided
-    if seed is not None:
-        random.seed(seed)
-    
-    entries = []
-    
-    # Phase 1: Add states with progressively more indices from indices_to_fill
-    current_filled = set(original_entry.filled_indices)  # Start with original filled indices
-    
-    for i in range(len(indices_to_fill) + 1):  # +1 to include the original state
-        entry_copy = copy.deepcopy(original_entry)
-        entry_copy.filled_indices = current_filled | set(indices_to_fill[:i])
-        entry_copy.num_attempts = original_entry.num_attempts + i  # Increment attempts for each letter added
-        entry_copy.guess_with_current_letters = False  # Reset guess flag when adding letters
-        
-        # Check if entry is now solved
-        if len(entry_copy.filled_indices) == entry_copy.L:
-            entry_copy.solved = True
-        
-        entries.append(entry_copy)
-    
-    # Phase 2: Fill remaining indices randomly until complete
-    if entries:
-        last_entry = entries[-1]
-        
-        # Get remaining unfilled indices (more efficient than recreating lists)
-        all_indices = set(range(original_entry.L))
-        remaining_indices = list(all_indices - last_entry.filled_indices)
-        
-        # Shuffle remaining indices for random order
-        random.shuffle(remaining_indices)
-        
-        # Add states filling one more random index at a time
-        current_entry = last_entry
-        for idx in remaining_indices:
-            entry_copy = copy.deepcopy(current_entry)
-            entry_copy.filled_indices.add(idx)
-            entry_copy.num_attempts += 1  # Increment attempts for each additional letter
-            entry_copy.guess_with_current_letters = False
-            
-            # Check if entry is now solved
-            if len(entry_copy.filled_indices) == entry_copy.L:
-                entry_copy.solved = True
-            
-            entries.append(entry_copy)
-            current_entry = entry_copy
-    
-    return entries
-    
-    
-
-
-
-def get_successive_probabilities(
-    grid: Grid,
-    model: ProbabilityModel,
-    entry_id: EntryId,
-    max_depth: int
-) -> List[float]:
-    
-    
-    probabilities = []
-
-    entry_state = grid.entries[entry_id]
-
-    entry_state_copy = copy.deepcopy(entry_state)
-    
-    return probabilities
-
+        # ΔV = Σ (after - base) over affected
+        return sum(after[j] - base[j] for j in affected)
 
 
 
